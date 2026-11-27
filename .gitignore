@@ -1,6 +1,7 @@
-# Python cache files
+# Cache files
 __pycache__/
 *.py[cod]
+ripe_atlas_cache/
 
 # Virtual environments
 venv/

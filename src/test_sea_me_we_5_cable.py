@@ -2,8 +2,10 @@
 
 import collections
 import datetime as dt
+import json
 import statistics
 from datetime import timezone
+from pathlib import Path
 
 import matplotlib
 import requests
@@ -29,42 +31,81 @@ MSM = {
     "7764 LUMS (AS17557, PTCL)": 179602008,
     "7812 Aero Cable (AS138910)": 214303896,
 }
-fig, axes = plt.subplots(2, 1, figsize=(11, 6.5), sharex=True)
-for ax, (vlab, prbs) in zip(axes, VPS.items()):
-    for lab, msm in MSM.items():
-        r = requests.get(
-            f"https://atlas.ripe.net/api/v2/measurements/{msm}/results/",
-            params={
-                "start": START,
-                "stop": STOP,
-                "probe_ids": ",".join(map(str, prbs)),
-            },
-            timeout=300,
-        ).json()
 
-        # Group the measurements by hour
-        h = collections.defaultdict(list)
-        for x in r:
-            if x.get("min", -1) > 0:
-                h[x["timestamp"] // 3600 * 3600].append(x["min"])
+# Cache configuration
+CACHE_DIR = Path("ripe_atlas_cache")
+CACHE_DIR.mkdir(exist_ok=True)
 
-        xs = sorted(h)
-        ax.plot(
-            [dt.datetime.fromtimestamp(t, U) for t in xs],
-            [statistics.median(h[t]) for t in xs],
-            label=lab,
-            lw=1.3,
-        )
-    ax.axvline(dt.datetime(2026, 11, 18, 13, tzinfo=U), color="red", ls="--", lw=1)
-    ax.set_title(f"From {vlab}")
-    ax.set_ylabel("median min RTT (ms)")
-    ax.grid(alpha=0.3)
-axes[0].legend(fontsize=8, loc="upper left")
-axes[1].xaxis.set_major_formatter(md.DateFormatter("%d %b"))
-fig.suptitle(
-    "RIPE Atlas anchoring-mesh pings to Pakistani anchors; red line = SMW5 fault onset (~13:00 UTC 18 Nov 2026)"
-)
-fig.tight_layout()
-fig.savefig("mesh_rtt_pk_anchors.png", dpi=150)
 
-print("Finished")
+def GetResults(msm, prbs, refresh=False):
+    """Get RIPE Atlas results, using local cache when available."""
+
+    cache_file = CACHE_DIR / f"{msm}_{'-'.join(map(str, prbs))}_{START}_{STOP}.json"
+
+    # Use cached results if available
+    if cache_file.exists() and not refresh:
+        print(f"Loading cache: {cache_file}")
+        with cache_file.open("r") as f:
+            return json.load(f)
+
+    # Otherwise fetch from RIPE Atlas
+    print(f"Downloading measurement {msm}, probes {prbs}...")
+
+    response = requests.get(
+        f"https://atlas.ripe.net/api/v2/measurements/{msm}/results/",
+        params={
+            "start": START,
+            "stop": STOP,
+            "probe_ids": ",".join(map(str, prbs)),
+        },
+        timeout=300,
+    )
+    response.raise_for_status()
+    results = response.json()
+
+    # Save results to cache
+    with cache_file.open("w") as f:
+        json.dump(results, f)
+
+    print(f"Cached: {cache_file}")
+    return results
+
+def CheckLatency(refresh=False):
+    fig, axes = plt.subplots(2, 1, figsize=(11, 6.5), sharex=True)
+    for ax, (vlab, prbs) in zip(axes, VPS.items()):
+        for lab, msm in MSM.items():
+            r = GetResults(msm, prbs, refresh=refresh)
+
+            # Group the measurements by hour
+            h = collections.defaultdict(list)
+            for x in r:
+                if x.get("min", -1) > 0:
+                    h[x["timestamp"] // 3600 * 3600].append(x["min"])
+
+            xs = sorted(h)
+            ax.plot(
+                [dt.datetime.fromtimestamp(t, U) for t in xs],
+                [statistics.median(h[t]) for t in xs],
+                label=lab,
+                lw=1.3,
+            )
+        ax.axvline(dt.datetime(2026, 11, 18, 13, tzinfo=U), color="red", ls="--", lw=1)
+        ax.set_title(f"From {vlab}")
+        ax.set_ylabel("median min RTT (ms)")
+        ax.grid(alpha=0.3)
+    axes[0].legend(fontsize=8, loc="upper left")
+    axes[1].xaxis.set_major_formatter(md.DateFormatter("%d %b"))
+    fig.suptitle(
+        "RIPE Atlas anchoring-mesh pings to Pakistani anchors; red line = SMW5 fault onset (~13:00 UTC 18 Nov 2026)"
+    )
+    fig.tight_layout()
+    fig.savefig("mesh_rtt_pk_anchors.png", dpi=150)
+
+
+def main():
+    CheckLatency()
+    print("Finished")
+
+
+if __name__ == "__main__":
+    main()
