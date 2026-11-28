@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 U: timezone = dt.UTC
 ts = lambda *a: int(dt.datetime(*a, tzinfo=U).timestamp())  # Convert to Unix timestamp
 START, STOP = ts(2026, 11, 14), ts(2026, 11, 23)
+EVENT = ts(2026, 11, 18, 13)
 
 # Define vantage points
 VPS = {
@@ -70,40 +71,149 @@ def GetResults(msm, prbs, refresh=False):
     print(f"Cached: {cache_file}")
     return results
 
-def CheckLatency(refresh=False):
+
+def AnalyseLatencies(results, normalise=True):
+    """
+    Calculate baseline-normalized hourly RTT for each
+    source-destination pair.
+
+    Returns:
+        probe_id -> {
+            baseline: float,
+            hourly: {timestamp: normalized_rtt}
+        }
+    """
+
+    # Group raw measurements by probe and hour
+    hourly = collections.defaultdict(lambda: collections.defaultdict(list))
+
+    for x in results:
+        if x.get("min", -1) <= 0:
+            continue
+
+        probe = x["prb_id"]
+        hour = x["timestamp"] // 3600 * 3600
+
+        hourly[probe][hour].append(x["min"])
+
+    # Calculate hourly median and pre-event baseline
+    output = {}
+
+    for probe, measurements in hourly.items():
+        hourly_medians = {
+            t: statistics.median(values) for t, values in measurements.items()
+        }
+
+        baseline = None
+        if normalise:
+            baseline_values = [
+                value for t, value in hourly_medians.items() if START <= t < EVENT
+            ]
+
+            if not baseline_values:
+                print(f"Warning: no baseline for probe {probe}")
+                continue
+
+            baseline = statistics.median(baseline_values)
+
+            # Normalise each hourly measurement against its baseline
+            hourly_medians = {
+                t: value - baseline for t, value in hourly_medians.items()
+            }
+
+        output[probe] = {
+            "baseline": baseline,
+            "hourly": hourly_medians,
+        }
+
+    return output
+
+
+def AggregateLatencies(results, normalise=True):
+    """
+    Aggregate baseline-normalized RTT across source probes.
+
+    Returns:
+        timestamp -> {
+            median: median normalized RTT
+            count: number of probes in hourly interval
+        }
+    """
+
+    per_probe = AnalyseLatencies(results, normalise)
+
+    # Group normalized RTT by hour
+    hourly = collections.defaultdict(list)
+
+    for probe_data in per_probe.values():
+        for timestamp, value in probe_data["hourly"].items():
+            hourly[timestamp].append(value)
+
+    return {
+        t: {
+            "median": statistics.median(values),
+            "count": len(values),
+        }
+        for t, values in hourly.items()
+    }
+
+def CheckLatencies(refresh=False, normalise=True):
+
     fig, axes = plt.subplots(2, 1, figsize=(11, 6.5), sharex=True)
+
     for ax, (vlab, prbs) in zip(axes, VPS.items()):
         for lab, msm in MSM.items():
-            r = GetResults(msm, prbs, refresh=refresh)
+            results = GetResults(msm, prbs, refresh=refresh)
+            aggregated = AggregateLatencies(results, normalise)
 
-            # Group the measurements by hour
-            h = collections.defaultdict(list)
-            for x in r:
-                if x.get("min", -1) > 0:
-                    h[x["timestamp"] // 3600 * 3600].append(x["min"])
+            xs = sorted(aggregated)
 
-            xs = sorted(h)
             ax.plot(
                 [dt.datetime.fromtimestamp(t, U) for t in xs],
-                [statistics.median(h[t]) for t in xs],
+                [aggregated[t]["median"] for t in xs],
                 label=lab,
                 lw=1.3,
             )
-        ax.axvline(dt.datetime(2026, 11, 18, 13, tzinfo=U), color="red", ls="--", lw=1)
+
+        ax.axvline(
+            dt.datetime.fromtimestamp(EVENT, U),
+            color="red",
+            ls="--",
+            lw=1,
+        )
+
+        if normalise:
+            ax.axhline(0, color="black", ls=":", lw=0.8)
+            ax.set_ylabel("RTT change from baseline (ms)")
+        else:
+            ax.set_ylabel("median min RTT (ms)")
+
         ax.set_title(f"From {vlab}")
-        ax.set_ylabel("median min RTT (ms)")
         ax.grid(alpha=0.3)
+
     axes[0].legend(fontsize=8, loc="upper left")
     axes[1].xaxis.set_major_formatter(md.DateFormatter("%d %b"))
-    fig.suptitle(
-        "RIPE Atlas anchoring-mesh pings to Pakistani anchors; red line = SMW5 fault onset (~13:00 UTC 18 Nov 2026)"
-    )
+
+    if normalise:
+        title = (
+            "Baseline-normalized RIPE Atlas RTT to Pakistani anchors; "
+            "red line = SMW5 fault onset (~13:00 UTC 18 Nov 2026)"
+        )
+    else:
+        title = (
+            "RIPE Atlas anchoring-mesh pings to Pakistani anchors; "
+            "red line = SMW5 fault onset (~13:00 UTC 18 Nov 2026)"
+        )
+
+    fig.suptitle(title)
+
     fig.tight_layout()
     fig.savefig("mesh_rtt_pk_anchors.png", dpi=150)
+    plt.close(fig)
 
 
 def main():
-    CheckLatency()
+    CheckLatencies()
     print("Finished")
 
 
